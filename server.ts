@@ -27,6 +27,7 @@ import { z } from 'zod'
 import { createTmuxSendKeys, dispatchAdminCommand, parseAdminCommand } from './admin.ts'
 import { loadSigningKey, parseNoAuditSigningFlag } from './audit-key-loader.ts'
 import { createBootAnchor, JournalWriter, verifyJournal } from './journal.ts'
+import { type CustomChannelPolicy, customGate, isMentioned } from './lib.custom.ts'
 import {
   type Access,
   AUDIT_RECEIPTS_MAX,
@@ -50,8 +51,8 @@ import {
   assertOutboundAllowed as libAssertOutboundAllowed,
   assertSendable as libAssertSendable,
   deliveredThreadKey as libDeliveredThreadKey,
-  gate as libGate,
   listSessions as libListSessions,
+  loadSession,
   PERMISSION_REPLY_RE,
   type PendingPolicyApproval,
   parseSendableRoots,
@@ -61,8 +62,11 @@ import {
   recordApprovalVote,
   redactSecretValues,
   resolveJournalPath,
+  type Session,
+  type SessionKey,
   sanitizeDisplayName,
   sanitizeFilename,
+  sessionPath,
   stripBotMention,
   validateSendableRoots,
 } from './lib.ts'
@@ -638,7 +642,7 @@ export {
 // ---------------------------------------------------------------------------
 
 async function gate(event: unknown): Promise<GateResult> {
-  return libGate(event, {
+  return customGate(event, {
     access: getAccess(),
     staticMode: STATIC_MODE,
     saveAccess,
@@ -2628,6 +2632,24 @@ async function deliverEvent(ev: Record<string, unknown>, access: Access): Promis
       thread_ts: incomingThreadTs,
     },
   })
+
+  // Thread owner enforcement: if threadOwnerOnly is set for this channel,
+  // drop messages from non-owners unless they explicitly @mention the bot.
+  if ((access.channels[channelId] as CustomChannelPolicy | undefined)?.threadOwnerOnly) {
+    const threadKey: SessionKey = {
+      channel: channelId,
+      thread: incomingThreadTs ?? (ev.ts as string),
+    }
+    let existingSession: Session | null = null
+    try {
+      existingSession = await loadSession(STATE_DIR, sessionPath(STATE_DIR, threadKey))
+    } catch {
+      // ENOENT = first message in thread, allow through
+    }
+    if (existingSession && existingSession.ownerId !== (ev.user as string)) {
+      if (!isMentioned(ev, botUserId)) return
+    }
+  }
 
   // Activate session and record inbound activity via the supervisor.
   // The thread key follows session-state-machine.md §39: top-level

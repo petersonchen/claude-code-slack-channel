@@ -27,7 +27,13 @@ import { z } from 'zod'
 import { createTmuxSendKeys, dispatchAdminCommand, parseAdminCommand } from './admin.ts'
 import { loadSigningKey, parseNoAuditSigningFlag } from './audit-key-loader.ts'
 import { createBootAnchor, JournalWriter, verifyJournal } from './journal.ts'
-import { type CustomChannelPolicy, customGate, isMentioned } from './lib.custom.ts'
+import {
+  applySubstitutions,
+  type CustomAccess,
+  type CustomChannelPolicy,
+  customGate,
+  isMentioned,
+} from './lib.custom.ts'
 import {
   type Access,
   AUDIT_RECEIPTS_MAX,
@@ -1145,7 +1151,10 @@ async function executeReplyStreamingPath(opts: {
 
 async function executeReply(args: Record<string, any>, ctx: ToolContext): Promise<ToolResult> {
   const chatId: string = args.chat_id
-  const text: string = args.text
+  const text: string = applySubstitutions(
+    args.text,
+    (ctx.getAccess() as CustomAccess).textSubstitutions,
+  )
   const threadTs: string | undefined = args.thread_ts
   const files: string[] | undefined = args.files
   const stream: boolean = args.stream === true

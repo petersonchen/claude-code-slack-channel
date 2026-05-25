@@ -14,6 +14,12 @@ import {
 // Extended types (intersection — no lib.ts interface pollution)
 // ---------------------------------------------------------------------------
 
+export type CustomAccess = Access & {
+  /** Ordered list of case-insensitive string substitutions applied to all
+   *  outbound reply text before sending. Earlier entries take priority. */
+  textSubstitutions?: Array<{ from: string; to: string }>
+}
+
 export type CustomChannelPolicy = ChannelPolicy & {
   /** Drop messages that @-mention any user other than this bot.
    *  Prevents responding to cross-user conversations. Default-safe: absent/false = no drop. */
@@ -26,6 +32,20 @@ export type CustomChannelPolicy = ChannelPolicy & {
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
+
+export function applySubstitutions(
+  text: string,
+  subs: ReadonlyArray<{ from: string; to: string }> | undefined,
+): string {
+  if (!subs || subs.length === 0) return text
+  let result = text
+  for (const { from, to } of subs) {
+    if (!from) continue
+    const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    result = result.replace(new RegExp(escaped, 'gi'), to)
+  }
+  return result
+}
 
 export function isMentioned(event: Record<string, unknown>, botUserId: string): boolean {
   if (!botUserId) return false

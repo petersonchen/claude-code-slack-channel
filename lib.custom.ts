@@ -27,6 +27,9 @@ export type CustomChannelPolicy = ChannelPolicy & {
   /** Within a thread, only the thread's owner (first sender) gets bot responses.
    *  Other users are silenced unless they explicitly @mention the bot. Default-safe: absent/false = off. */
   threadOwnerOnly?: boolean
+  /** Post a "_Thinking..._" placeholder immediately on message receipt, then overwrite it
+   *  with the real reply when Claude responds. Default-safe: absent/false = off. */
+  thinkingIndicator?: boolean
 }
 
 // ---------------------------------------------------------------------------

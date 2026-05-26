@@ -1098,6 +1098,13 @@ async function executeReplyStreamingPath(opts: {
     {
       assertOutboundAllowed: (c, t) => ctx.assertOutboundAllowed(c, t),
       postMessage: async (a) => {
+        const streamThinkingKey = `${a.channel}:${a.thread_ts}`
+        const streamThinkingTs = pendingThinkingTs.get(streamThinkingKey)
+        if (streamThinkingTs) {
+          pendingThinkingTs.delete(streamThinkingKey)
+          await ctx.web.chat.update({ channel: a.channel, ts: streamThinkingTs, text: a.text })
+          return { ts: streamThinkingTs }
+        }
         const res = await ctx.web.chat.postMessage({
           channel: a.channel,
           text: a.text,
@@ -1199,16 +1206,28 @@ async function executeReply(args: Record<string, any>, ctx: ToolContext): Promis
 
   const chunks = chunkText(text, limit, mode)
 
+  const thinkingKey = `${chatId}:${threadTs}`
+  const thinkingTs = pendingThinkingTs.get(thinkingKey)
+  if (thinkingTs) pendingThinkingTs.delete(thinkingKey)
+
   let lastTs = ''
+  let firstChunk = true
   for (const chunk of chunks) {
-    const res = await ctx.web.chat.postMessage({
-      channel: chatId,
-      text: chunk,
-      thread_ts: threadTs,
-      unfurl_links: false,
-      unfurl_media: false,
-    })
-    lastTs = (res.ts as string) || lastTs
+    let res: { ts?: string }
+    if (firstChunk && thinkingTs) {
+      res = await ctx.web.chat.update({ channel: chatId, ts: thinkingTs, text: chunk })
+      lastTs = thinkingTs
+    } else {
+      res = await ctx.web.chat.postMessage({
+        channel: chatId,
+        text: chunk,
+        thread_ts: threadTs,
+        unfurl_links: false,
+        unfurl_media: false,
+      })
+      lastTs = (res.ts as string) || lastTs
+    }
+    firstChunk = false
   }
 
   // Upload files if provided (shared helper — Gemini #188)
@@ -1969,6 +1988,9 @@ type PendingPermissionEntry = {
   policy?: PendingPolicyApproval
 }
 const pendingPermissions = new Map<string, PendingPermissionEntry>()
+
+// thinkingIndicator — key: `${channel}:${thread_ts}` → ts of the placeholder message
+const pendingThinkingTs = new Map<string, string>()
 
 function pruneStalePermissions(): void {
   const cutoff = Date.now() - PERM_TTL_MS
@@ -2796,6 +2818,24 @@ async function deliverEvent(ev: Record<string, unknown>, access: Access): Promis
       })
     } catch {
       /* non-critical */
+    }
+  }
+
+  // thinkingIndicator — post placeholder before handing off to Claude
+  const channelPolicy = access.channels[channelId] as CustomChannelPolicy | undefined
+  if (channelPolicy?.thinkingIndicator) {
+    const thinkingThreadTs = incomingThreadTs ?? (ev.ts as string)
+    try {
+      const res = await web.chat.postMessage({
+        channel: channelId,
+        thread_ts: thinkingThreadTs,
+        text: '_Thinking..._',
+        unfurl_links: false,
+        unfurl_media: false,
+      })
+      if (res.ts) pendingThinkingTs.set(`${channelId}:${thinkingThreadTs}`, res.ts as string)
+    } catch {
+      /* best-effort — failure here must not block delivery */
     }
   }
 

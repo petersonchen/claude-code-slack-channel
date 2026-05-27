@@ -18,6 +18,8 @@ export type CustomAccess = Access & {
   /** Ordered list of case-insensitive string substitutions applied to all
    *  outbound reply text before sending. Earlier entries take priority. */
   textSubstitutions?: Array<{ from: string; to: string }>
+  /** Default automatic reply engine. Absent keeps upstream Claude delivery. */
+  replyEngine?: CustomReplyEngine
 }
 
 export type CustomChannelPolicy = ChannelPolicy & {
@@ -30,7 +32,15 @@ export type CustomChannelPolicy = ChannelPolicy & {
   /** Post a "_Thinking..._" placeholder immediately on message receipt, then overwrite it
    *  with the real reply when Claude responds. Default-safe: absent/false = off. */
   thinkingIndicator?: boolean
+  /** Per-channel automatic reply engine override. */
+  replyEngine?: CustomReplyEngine
+  /** Context recovery controls for ubi-code thread history fetches. */
+  contextRecovery?: {
+    includeUsers?: 'owner_and_bot_only' | 'allowlisted_and_bot' | 'all_sanitized'
+  }
 }
+
+export type CustomReplyEngine = 'claude' | 'ubi_code' | 'off'
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -54,6 +64,18 @@ export function isMentioned(event: Record<string, unknown>, botUserId: string): 
   if (!botUserId) return false
   const text = (event.text as string | undefined) || ''
   return text.includes(`<@${botUserId}>`)
+}
+
+export function resolveReplyEngine(
+  access: Access,
+  channelId: string,
+  env: Record<string, string | undefined> = process.env,
+): CustomReplyEngine {
+  const customAccess = access as CustomAccess
+  const policy = access.channels[channelId] as CustomChannelPolicy | undefined
+  const value = policy?.replyEngine ?? customAccess.replyEngine ?? env.SLACK_REPLY_ENGINE ?? 'claude'
+  if (value === 'ubi_code' || value === 'off' || value === 'claude') return value
+  return 'claude'
 }
 
 function mentionsOtherUser(event: Record<string, unknown>, botUserId: string): boolean {

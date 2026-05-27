@@ -12,5 +12,5 @@
     "noEmit": true,
     "types": ["bun-types"]
   },
-  "include": ["server.ts", "lib.ts", "lib.custom.ts", "server.test.ts", "policy.ts", "journal.ts", "supervisor.ts", "features/**/*.ts"]
+  "include": ["server.ts", "lib.ts", "lib.custom.ts", "ubi-code.custom.ts", "server.test.ts", "policy.ts", "journal.ts", "supervisor.ts", "features/**/*.ts"]
 }

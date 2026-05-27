@@ -33,6 +33,7 @@ import {
   type CustomChannelPolicy,
   customGate,
   isMentioned,
+  resolveReplyEngine,
 } from './lib.custom.ts'
 import {
   type Access,
@@ -2627,6 +2628,32 @@ export async function activateAndTouch(
 // Inbound message handler
 // ---------------------------------------------------------------------------
 
+async function shouldDropForThreadOwnerOnly(
+  ev: Record<string, unknown>,
+  access: Access,
+): Promise<boolean> {
+  const channelId = ev.channel as string
+  const incomingThreadTs = ev.thread_ts as string | undefined
+  if (!(access.channels[channelId] as CustomChannelPolicy | undefined)?.threadOwnerOnly)
+    return false
+
+  const threadKey: SessionKey = {
+    channel: channelId,
+    thread: incomingThreadTs ?? (ev.ts as string),
+  }
+  let existingSession: Session | null = null
+  try {
+    existingSession = await loadSession(STATE_DIR, sessionPath(STATE_DIR, threadKey))
+  } catch {
+    // ENOENT = first message in thread, allow through.
+  }
+  return Boolean(
+    existingSession &&
+      existingSession.ownerId !== (ev.user as string) &&
+      !isMentioned(ev, botUserId),
+  )
+}
+
 /** Deliver a gated inbound event to Claude Code via MCP.
  *
  *  Called by handleMessage when gate() returns action='deliver'. Handles:
@@ -2664,23 +2691,7 @@ async function deliverEvent(ev: Record<string, unknown>, access: Access): Promis
     },
   })
 
-  // Thread owner enforcement: if threadOwnerOnly is set for this channel,
-  // drop messages from non-owners unless they explicitly @mention the bot.
-  if ((access.channels[channelId] as CustomChannelPolicy | undefined)?.threadOwnerOnly) {
-    const threadKey: SessionKey = {
-      channel: channelId,
-      thread: incomingThreadTs ?? (ev.ts as string),
-    }
-    let existingSession: Session | null = null
-    try {
-      existingSession = await loadSession(STATE_DIR, sessionPath(STATE_DIR, threadKey))
-    } catch {
-      // ENOENT = first message in thread, allow through
-    }
-    if (existingSession && existingSession.ownerId !== (ev.user as string)) {
-      if (!isMentioned(ev, botUserId)) return
-    }
-  }
+  if (await shouldDropForThreadOwnerOnly(ev, access)) return
 
   // Activate session and record inbound activity via the supervisor.
   // The thread key follows session-state-machine.md §39: top-level
@@ -2944,6 +2955,27 @@ async function handleMessage(event: unknown): Promise<void> {
       // verbs as chat content).
       const handled = await tryDispatchAdminVerb(ev, result.access!)
       if (handled) return
+      const replyEngine = resolveReplyEngine(result.access!, ev.channel as string)
+      if (replyEngine === 'off') return
+      if (replyEngine === 'ubi_code') {
+        if (await shouldDropForThreadOwnerOnly(ev, result.access!)) return
+        const { maybeHandleUbiCodeReply } = await import('./ubi-code.custom.ts')
+        await maybeHandleUbiCodeReply({
+          event: ev,
+          access: result.access!,
+          web,
+          botUserId,
+          ubiCodeUrl: process.env.UBI_CODE_URL,
+          sharedSecret: process.env.UBI_CODE_SHARED_SECRET,
+          timeoutMs: Number(process.env.UBI_CODE_TIMEOUT_MS || 120_000),
+          journalWrite,
+          activateSession: async (channel, thread, ownerId) => {
+            if (supervisor !== null)
+              await activateAndTouch(supervisor, { channel, thread }, ownerId)
+          },
+        })
+        return
+      }
       await deliverEvent(ev, result.access!)
     }
   }

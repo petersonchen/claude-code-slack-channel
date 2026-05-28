@@ -1,7 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { appendFileSync } from 'node:fs'
 import type { WebClient } from '@slack/web-api'
 import type { Access } from './lib.ts'
 import { type CustomChannelPolicy, resolveReplyEngine } from './lib.custom.ts'
+
+const UBI_ERROR_LOG = '/state/ubi-code-error.log'
+
+function ubiLog(level: 'info' | 'warn' | 'error', msg: string, extra?: Record<string, unknown>): void {
+  const line = JSON.stringify({ ts: new Date().toISOString(), level, msg, ...extra })
+  try { appendFileSync(UBI_ERROR_LOG, line + '\n') } catch { /* state dir may not be mounted */ }
+  if (level === 'error') console.error('[ubi-code]', msg, extra ?? '')
+}
 
 type JournalWrite = (input: any) => void
 
@@ -38,7 +47,27 @@ const historyCache = new Map<string, ThreadHistoryCacheEntry>()
 const HISTORY_CACHE_TTL_MS = 60_000
 const MAX_HISTORY_MESSAGES = 30
 const MAX_HISTORY_CHARS = 12_000
-const SLACK_CHUNK_LIMIT = 3900
+const SLACK_CHUNK_MAX_BYTES = 3000
+
+function chunkByBytes(text: string): string[] {
+  const enc = new TextEncoder()
+  const chunks: string[] = []
+  let start = 0
+  while (start < text.length) {
+    let end = start
+    let bytes = 0
+    while (end < text.length) {
+      const b = enc.encode(text[end]).length
+      if (bytes + b > SLACK_CHUNK_MAX_BYTES) break
+      bytes += b
+      end++
+    }
+    if (end === start) end = start + 1 // always advance past a single oversized char
+    chunks.push(text.slice(start, end))
+    start = end
+  }
+  return chunks.length > 0 ? chunks : ['']
+}
 
 function hashText(text: string): string {
   return `sha256:${createHash('sha256').update(text || '').digest('hex')}`
@@ -53,11 +82,6 @@ function threadTsFor(ev: Record<string, unknown>): string {
   return (ev.thread_ts as string | undefined) ?? (ev.ts as string)
 }
 
-function chunkText(text: string): string[] {
-  const chunks: string[] = []
-  for (let i = 0; i < text.length; i += SLACK_CHUNK_LIMIT) chunks.push(text.slice(i, i + SLACK_CHUNK_LIMIT))
-  return chunks.length > 0 ? chunks : ['']
-}
 
 function contextRecoveryMode(access: Access, channel: string): string {
   const policy = access.channels[channel] as CustomChannelPolicy | undefined
@@ -159,10 +183,19 @@ async function postOrUpdateAnswer(opts: {
   placeholderTs: string | null
   text: string
 }): Promise<string | null> {
-  const chunks = chunkText(opts.text)
+  const chunks = chunkByBytes(opts.text)
   let lastTs = opts.placeholderTs
   if (opts.placeholderTs) {
-    await opts.web.chat.update({ channel: opts.channel, ts: opts.placeholderTs, text: chunks[0] })
+    try {
+      await opts.web.chat.update({ channel: opts.channel, ts: opts.placeholderTs, text: chunks[0] })
+    } catch (e) {
+      ubiLog('error', 'chat.update failed', {
+        channel: opts.channel,
+        chars: chunks[0].length,
+        slack_error: e instanceof Error ? e.message : String(e),
+      })
+      throw e
+    }
   } else {
     const res = await opts.web.chat.postMessage({
       channel: opts.channel,
@@ -173,15 +206,26 @@ async function postOrUpdateAnswer(opts: {
     })
     lastTs = (res.ts as string | undefined) ?? null
   }
-  for (const chunk of chunks.slice(1)) {
-    const res = await opts.web.chat.postMessage({
-      channel: opts.channel,
-      thread_ts: opts.threadTs,
-      text: chunk,
-      unfurl_links: false,
-      unfurl_media: false,
-    })
-    lastTs = (res.ts as string | undefined) ?? lastTs
+  for (let i = 1; i < chunks.length; i++) {
+    try {
+      const res = await opts.web.chat.postMessage({
+        channel: opts.channel,
+        thread_ts: opts.threadTs,
+        text: chunks[i],
+        unfurl_links: false,
+        unfurl_media: false,
+      })
+      lastTs = (res.ts as string | undefined) ?? lastTs
+    } catch (e) {
+      ubiLog('error', 'chat.postMessage chunk failed', {
+        channel: opts.channel,
+        chunk_index: i,
+        total_chunks: chunks.length,
+        chars: chunks[i].length,
+        slack_error: e instanceof Error ? e.message : String(e),
+      })
+      throw e
+    }
   }
   return lastTs
 }
@@ -314,6 +358,13 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
     })
     return true
   } catch (err) {
+    ubiLog('error', 'maybeHandleUbiCodeReply failed', {
+      channel,
+      thread_ts: threadTs,
+      request_id: requestId,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? (err.stack ?? '') : '',
+    })
     const fallback = '發生錯誤，暫時無法回答。請稍後再試。'
     try {
       await postOrUpdateAnswer({ web: opts.web, channel, threadTs, placeholderTs, text: fallback })

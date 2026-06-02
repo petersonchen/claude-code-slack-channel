@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync } from 'node:fs'
 import type { WebClient } from '@slack/web-api'
 import type { Access } from './lib.ts'
-import { type CustomChannelPolicy, resolveReplyEngine } from './lib.custom.ts'
+import { type CustomChannelPolicy, resolveReplyEngine, resolveUbiCodeProfile } from './lib.custom.ts'
 
 const UBI_ERROR_LOG = '/state/ubi-code-error.log'
 
@@ -282,6 +282,7 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
       threadTs,
     })
 
+    const ubiCodeProfile = resolveUbiCodeProfile(opts.access, channel)
     const baseRequest = {
       request_id: requestId,
       channel,
@@ -290,6 +291,7 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
       user: user ?? 'unknown',
       text,
       metadata: { is_dm: String(opts.event.channel_type || '') === 'im' },
+      ...(ubiCodeProfile ? { profile: ubiCodeProfile } : {}),
     }
 
     let response = await callUbiCode(

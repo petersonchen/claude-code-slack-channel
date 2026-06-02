@@ -20,6 +20,9 @@ export type CustomAccess = Access & {
   textSubstitutions?: Array<{ from: string; to: string }>
   /** Default automatic reply engine. Absent keeps upstream Claude delivery. */
   replyEngine?: CustomReplyEngine
+  /** Default ubi-code model profile when a channel routes to the ubi_code engine
+   *  without its own override. Absent lets ubi-code pick its own default. */
+  ubiCodeProfile?: string
 }
 
 export type CustomChannelPolicy = ChannelPolicy & {
@@ -34,6 +37,10 @@ export type CustomChannelPolicy = ChannelPolicy & {
   thinkingIndicator?: boolean
   /** Per-channel automatic reply engine override. */
   replyEngine?: CustomReplyEngine
+  /** Per-channel ubi-code model profile (only meaningful when replyEngine resolves to
+   *  ubi_code). Sent to ubi-code as the `profile` field; unknown there falls back to
+   *  ubi-code's own default. */
+  ubiCodeProfile?: string
   /** Context recovery controls for ubi-code thread history fetches. */
   contextRecovery?: {
     includeUsers?: 'owner_and_bot_only' | 'allowlisted_and_bot' | 'all_sanitized'
@@ -76,6 +83,20 @@ export function resolveReplyEngine(
   const value = policy?.replyEngine ?? customAccess.replyEngine ?? env.SLACK_REPLY_ENGINE ?? 'claude'
   if (value === 'ubi_code' || value === 'off' || value === 'claude') return value
   return 'claude'
+}
+
+/** Resolve the ubi-code model profile for a channel. Precedence: per-channel policy →
+ *  workspace default → UBI_CODE_MODEL_PROFILE env → undefined (ubi-code uses its own
+ *  default). Only meaningful when the resolved engine is ubi_code. */
+export function resolveUbiCodeProfile(
+  access: Access,
+  channelId: string,
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const customAccess = access as CustomAccess
+  const policy = access.channels[channelId] as CustomChannelPolicy | undefined
+  const value = policy?.ubiCodeProfile ?? customAccess.ubiCodeProfile ?? env.UBI_CODE_MODEL_PROFILE
+  return value || undefined
 }
 
 function mentionsOtherUser(event: Record<string, unknown>, botUserId: string): boolean {

@@ -34,6 +34,7 @@ import {
   customGate,
   isMentioned,
   resolveReplyEngine,
+  resolveUbiCodeProfile,
 } from './lib.custom.ts'
 import {
   type Access,
@@ -102,6 +103,7 @@ import {
   evaluate as policyEvaluate,
 } from './policy.ts'
 import { streamReply } from './stream-reply.ts'
+import { traceRoute } from './trace.custom.ts'
 
 // ---------------------------------------------------------------------------
 // --verify-audit-log subcommand (ccsc-t7j, Epic 30-A.15)
@@ -2956,6 +2958,16 @@ async function handleMessage(event: unknown): Promise<void> {
       const handled = await tryDispatchAdminVerb(ev, result.access!)
       if (handled) return
       const replyEngine = resolveReplyEngine(result.access!, ev.channel as string)
+      traceRoute({
+        channel: ev.channel as string,
+        thread: (ev.thread_ts as string) || (ev.ts as string),
+        user: ev.user as string | undefined,
+        engine: replyEngine,
+        profile:
+          replyEngine === 'ubi_code'
+            ? resolveUbiCodeProfile(result.access!, ev.channel as string)
+            : undefined,
+      })
       if (replyEngine === 'off') return
       if (replyEngine === 'ubi_code') {
         if (await shouldDropForThreadOwnerOnly(ev, result.access!)) return

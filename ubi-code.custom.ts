@@ -3,6 +3,7 @@ import { appendFileSync } from 'node:fs'
 import type { WebClient } from '@slack/web-api'
 import type { Access } from './lib.ts'
 import { type CustomChannelPolicy, resolveReplyEngine, resolveUbiCodeProfile } from './lib.custom.ts'
+import { traceReply } from './trace.custom.ts'
 
 const UBI_ERROR_LOG = '/state/ubi-code-error.log'
 
@@ -294,6 +295,7 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
       ...(ubiCodeProfile ? { profile: ubiCodeProfile } : {}),
     }
 
+    const startedAt = Date.now()
     let response = await callUbiCode(
       ubiCodeUrl,
       baseRequest,
@@ -333,10 +335,29 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
         outcome: 'n/a',
         input: { channel, thread_ts: threadTs, request_id: requestId, status: response.status },
       })
+      traceReply({
+        channel,
+        thread: threadTs,
+        engine: 'ubi_code',
+        profile: ubiCodeProfile,
+        status: response.status ?? 'no_reply',
+        latencyMs: Date.now() - startedAt,
+        question: text,
+      })
       return true
     }
 
     const answer = response.answer || 'wiki 中沒有相關資料'
+    traceReply({
+      channel,
+      thread: threadTs,
+      engine: 'ubi_code',
+      profile: ubiCodeProfile,
+      status: response.status,
+      latencyMs: Date.now() - startedAt,
+      question: text,
+      answer,
+    })
     const replyTs = await postOrUpdateAnswer({
       web: opts.web,
       channel,

@@ -11,7 +11,7 @@
 //
 // Fire-and-forget: append failures are swallowed so tracing never blocks delivery.
 // claude-engine outcome (latency / answer) is intentionally NOT captured yet —
-// only its `route` line is written. See backlog.md.
+// only its `route` line is written. See docs/backlog.md.
 
 import { appendFile } from 'node:fs/promises'
 

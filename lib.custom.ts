@@ -18,9 +18,9 @@ export type CustomAccess = Access & {
   /** Ordered list of case-insensitive string substitutions applied to all
    *  outbound reply text before sending. Earlier entries take priority. */
   textSubstitutions?: Array<{ from: string; to: string }>
-  /** Default reply service. Absent defaults to 'slack-cc' (slack-cc's own Claude
-   *  delivery). 'ubi-code' routes to the ubi-code service; 'off' disables replies. */
-  replyService?: CustomReplyService
+  // NOTE: no workspace-level replyService — the workspace default is fixed to
+  // 'ubi-code' in resolveReplyService() and cannot be set via access.json. Only a
+  // per-channel policy (or the SLACK_REPLY_SERVICE env) overrides it.
   /** Default ubi-code model profile when a channel routes to the ubi-code service
    *  without its own override. Absent → no profile sent → ubi-code rejects with 400. */
   ubiCodeProfile?: string
@@ -83,11 +83,14 @@ export function resolveReplyService(
   channelId: string,
   env: Record<string, string | undefined> = process.env,
 ): CustomReplyService {
-  const customAccess = access as CustomAccess
   const policy = access.channels[channelId] as CustomChannelPolicy | undefined
-  const value = policy?.replyService ?? customAccess.replyService ?? env.SLACK_REPLY_SERVICE ?? 'slack-cc'
+  // Workspace default is fixed to 'ubi-code' in code (NOT settable via access.json):
+  // an unconfigured channel routes to ubi-code, sends no profile, and gets a 400 there —
+  // forcing every ubi-code channel to declare its ubiCodeProfile. Only a per-channel
+  // policy or the SLACK_REPLY_SERVICE env can override this default.
+  const value = policy?.replyService ?? env.SLACK_REPLY_SERVICE ?? 'ubi-code'
   if (value === 'ubi-code' || value === 'off' || value === 'slack-cc') return value
-  return 'slack-cc'
+  return 'ubi-code'
 }
 
 /** Resolve the ubi-code model profile for a channel. Precedence: per-channel policy →

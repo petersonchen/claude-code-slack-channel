@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync } from 'node:fs'
 import type { WebClient } from '@slack/web-api'
 import type { Access } from './lib.ts'
-import { type CustomChannelPolicy, resolveReplyEngine, resolveUbiCodeProfile } from './lib.custom.ts'
+import { type CustomChannelPolicy, resolveReplyService, resolveUbiCodeProfile } from './lib.custom.ts'
 import { traceReply } from './trace.custom.ts'
 
 const UBI_ERROR_LOG = '/state/ubi-code-error.log'
@@ -16,7 +16,14 @@ function ubiLog(level: 'info' | 'warn' | 'error', msg: string, extra?: Record<st
 type JournalWrite = (input: any) => void
 
 type UbiCodeStatus =
-  | { status: 'answered'; should_reply?: boolean; answer?: string; sources?: string[]; confidence?: string }
+  | {
+      status: 'answered'
+      should_reply?: boolean
+      answer?: string
+      sources?: string[]
+      confidence?: string
+      rules?: string[]
+    }
   | { status: 'needs_thread_history'; reason?: string }
   | { status: 'error'; error?: string }
 
@@ -251,9 +258,9 @@ async function postThinkingIfEnabled(opts: {
 
 export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptions): Promise<boolean> {
   const channel = opts.event.channel as string
-  const engine = resolveReplyEngine(opts.access, channel)
-  if (engine === 'claude') return false
-  if (engine === 'off') return true
+  const service = resolveReplyService(opts.access, channel)
+  if (service === 'slack-cc') return false
+  if (service === 'off') return true
 
   const ubiCodeUrl = opts.ubiCodeUrl || process.env.UBI_CODE_URL
   if (!ubiCodeUrl) {
@@ -338,7 +345,7 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
       traceReply({
         channel,
         thread: threadTs,
-        engine: 'ubi_code',
+        service: 'ubi-code',
         profile: ubiCodeProfile,
         status: response.status ?? 'no_reply',
         latencyMs: Date.now() - startedAt,
@@ -351,10 +358,11 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
     traceReply({
       channel,
       thread: threadTs,
-      engine: 'ubi_code',
+      service: 'ubi-code',
       profile: ubiCodeProfile,
       status: response.status,
       latencyMs: Date.now() - startedAt,
+      rules: response.rules,
       question: text,
       answer,
     })

@@ -18,10 +18,11 @@ export type CustomAccess = Access & {
   /** Ordered list of case-insensitive string substitutions applied to all
    *  outbound reply text before sending. Earlier entries take priority. */
   textSubstitutions?: Array<{ from: string; to: string }>
-  /** Default automatic reply engine. Absent keeps upstream Claude delivery. */
-  replyEngine?: CustomReplyEngine
-  /** Default ubi-code model profile when a channel routes to the ubi_code engine
-   *  without its own override. Absent lets ubi-code pick its own default. */
+  /** Default reply service. Absent defaults to 'slack-cc' (slack-cc's own Claude
+   *  delivery). 'ubi-code' routes to the ubi-code service; 'off' disables replies. */
+  replyService?: CustomReplyService
+  /** Default ubi-code model profile when a channel routes to the ubi-code service
+   *  without its own override. Absent → no profile sent → ubi-code rejects with 400. */
   ubiCodeProfile?: string
 }
 
@@ -35,11 +36,11 @@ export type CustomChannelPolicy = ChannelPolicy & {
   /** Post a "_Thinking..._" placeholder immediately on message receipt, then overwrite it
    *  with the real reply when Claude responds. Default-safe: absent/false = off. */
   thinkingIndicator?: boolean
-  /** Per-channel automatic reply engine override. */
-  replyEngine?: CustomReplyEngine
-  /** Per-channel ubi-code model profile (only meaningful when replyEngine resolves to
-   *  ubi_code). Sent to ubi-code as the `profile` field; unknown there falls back to
-   *  ubi-code's own default. */
+  /** Per-channel reply service override. */
+  replyService?: CustomReplyService
+  /** Per-channel ubi-code model profile (only meaningful when replyService resolves to
+   *  ubi-code). Sent to ubi-code as the `profile` field. No server-side default there —
+   *  unknown / absent profile is rejected with 400. */
   ubiCodeProfile?: string
   /** Context recovery controls for ubi-code thread history fetches. */
   contextRecovery?: {
@@ -47,7 +48,11 @@ export type CustomChannelPolicy = ChannelPolicy & {
   }
 }
 
-export type CustomReplyEngine = 'claude' | 'ubi_code' | 'off'
+// Values match the service folder names. 'slack-cc' = slack-cc's own native Claude
+// delivery; 'ubi-code' = route to the ubi-code service; 'off' = no auto reply. (Distinct
+// from ubi-code's internal profile.engine = 'claude-cli' | 'ai-sdk', which only governs
+// how the ubi-code service calls its LLM.)
+export type CustomReplyService = 'slack-cc' | 'ubi-code' | 'off'
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -73,21 +78,21 @@ export function isMentioned(event: Record<string, unknown>, botUserId: string): 
   return text.includes(`<@${botUserId}>`)
 }
 
-export function resolveReplyEngine(
+export function resolveReplyService(
   access: Access,
   channelId: string,
   env: Record<string, string | undefined> = process.env,
-): CustomReplyEngine {
+): CustomReplyService {
   const customAccess = access as CustomAccess
   const policy = access.channels[channelId] as CustomChannelPolicy | undefined
-  const value = policy?.replyEngine ?? customAccess.replyEngine ?? env.SLACK_REPLY_ENGINE ?? 'claude'
-  if (value === 'ubi_code' || value === 'off' || value === 'claude') return value
-  return 'claude'
+  const value = policy?.replyService ?? customAccess.replyService ?? env.SLACK_REPLY_SERVICE ?? 'slack-cc'
+  if (value === 'ubi-code' || value === 'off' || value === 'slack-cc') return value
+  return 'slack-cc'
 }
 
 /** Resolve the ubi-code model profile for a channel. Precedence: per-channel policy →
- *  workspace default → UBI_CODE_MODEL_PROFILE env → undefined (ubi-code uses its own
- *  default). Only meaningful when the resolved engine is ubi_code. */
+ *  workspace default → UBI_CODE_MODEL_PROFILE env → undefined. Only meaningful when the
+ *  resolved service is ubi-code; undefined → no profile sent → ubi-code rejects with 400. */
 export function resolveUbiCodeProfile(
   access: Access,
   channelId: string,

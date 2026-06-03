@@ -33,7 +33,7 @@ import {
   type CustomChannelPolicy,
   customGate,
   isMentioned,
-  resolveReplyEngine,
+  resolveReplyService,
   resolveUbiCodeProfile,
 } from './lib.custom.ts'
 import {
@@ -2957,19 +2957,19 @@ async function handleMessage(event: unknown): Promise<void> {
       // verbs as chat content).
       const handled = await tryDispatchAdminVerb(ev, result.access!)
       if (handled) return
-      const replyEngine = resolveReplyEngine(result.access!, ev.channel as string)
+      const replyService = resolveReplyService(result.access!, ev.channel as string)
       traceRoute({
         channel: ev.channel as string,
         thread: (ev.thread_ts as string) || (ev.ts as string),
         user: ev.user as string | undefined,
-        engine: replyEngine,
+        service: replyService,
         profile:
-          replyEngine === 'ubi_code'
+          replyService === 'ubi-code'
             ? resolveUbiCodeProfile(result.access!, ev.channel as string)
             : undefined,
       })
-      if (replyEngine === 'off') return
-      if (replyEngine === 'ubi_code') {
+      if (replyService === 'off') return
+      if (replyService === 'ubi-code') {
         if (await shouldDropForThreadOwnerOnly(ev, result.access!)) return
         const { maybeHandleUbiCodeReply } = await import('./ubi-code.custom.ts')
         await maybeHandleUbiCodeReply({

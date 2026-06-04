@@ -4,9 +4,9 @@
 // WHY THIS EXISTS
 // ---------------
 // Answer-text substitution (workspace `textSubstitutions`: branding masks + the
-// `@ONCALL` escalation placeholder) was applied ad-hoc at each reply site. That meant
+// `SLW-CMDB-ADMIN` escalation placeholder) was applied ad-hoc at each reply site. That meant
 // every NEW reply service had to remember to call applySubstitutions itself; forgetting
-// leaks raw `@ONCALL` to Slack and breaks the claude→LLM mask. `sendServiceAnswer()` is
+// leaks raw `SLW-CMDB-ADMIN` to Slack and breaks the claude→LLM mask. `sendServiceAnswer()` is
 // the shared chokepoint: it runs `prepareAnswerText()` INTERNALLY, then chunks and posts.
 // Any service-backed reply path (ubi-code today, future services tomorrow) that routes
 // its answer through here gets substitution for free — structurally, not by convention.

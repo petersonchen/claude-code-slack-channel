@@ -280,7 +280,7 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
       return true
     }
 
-    // Raw model output. Workspace textSubstitutions (@ONCALL escalation placeholder +
+    // Raw model output. Workspace textSubstitutions (SLW-CMDB-ADMIN escalation placeholder +
     // claude→LLM masking) are applied inside sendServiceAnswer() — the shared chokepoint
     // every service-backed reply path funnels through — not here. trace/journal log the
     // pre-substitution model output on purpose.

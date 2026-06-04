@@ -75,7 +75,7 @@ export function applySubstitutions(
 /** The single mandatory chokepoint for outbound *answer* text. Every reply service MUST
  *  route its user-facing answer through this — directly, or (preferred) via
  *  `sendServiceAnswer()` in reply.custom.ts, which calls it internally — before posting to
- *  Slack. This is what makes workspace `textSubstitutions` (branding masks, the `@ONCALL`
+ *  Slack. This is what makes workspace `textSubstitutions` (branding masks, the `SLW-CMDB-ADMIN`
  *  escalation placeholder) apply uniformly across ALL reply services. A new reply service
  *  that posts answer text without going through here will leak raw placeholders.
  *

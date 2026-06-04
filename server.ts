@@ -90,6 +90,7 @@ import {
 import { createMuteStore } from './mute-store.ts'
 import { createMemoryNonceStore, mintNonce, verifyNonce } from './nonce-hitl.ts'
 import { createPeerBotRateLimitStore } from './peer-bot-rate-limit.ts'
+import { consumePlaceholder, pushPlaceholder } from './placeholder-store.custom.ts'
 import {
   type ApprovalKey,
   approvalKey,
@@ -1102,9 +1103,8 @@ async function executeReplyStreamingPath(opts: {
       assertOutboundAllowed: (c, t) => ctx.assertOutboundAllowed(c, t),
       postMessage: async (a) => {
         const streamThinkingKey = `${a.channel}:${a.thread_ts}`
-        const streamThinkingTs = pendingThinkingTs.get(streamThinkingKey)
+        const streamThinkingTs = consumePlaceholder(streamThinkingKey)
         if (streamThinkingTs) {
-          pendingThinkingTs.delete(streamThinkingKey)
           await ctx.web.chat.update({ channel: a.channel, ts: streamThinkingTs, text: a.text })
           return { ts: streamThinkingTs }
         }
@@ -1222,8 +1222,7 @@ async function executeReply(args: Record<string, any>, ctx: ToolContext): Promis
   const chunks = chunkText(text, limit, mode)
 
   const thinkingKey = `${chatId}:${threadTs}`
-  const thinkingTs = pendingThinkingTs.get(thinkingKey)
-  if (thinkingTs) pendingThinkingTs.delete(thinkingKey)
+  const thinkingTs = consumePlaceholder(thinkingKey)
 
   let lastTs = ''
   let firstChunk = true
@@ -2017,8 +2016,9 @@ type PendingPermissionEntry = {
 }
 const pendingPermissions = new Map<string, PendingPermissionEntry>()
 
-// thinkingIndicator — key: `${channel}:${thread_ts}` → ts of the placeholder message
-const pendingThinkingTs = new Map<string, string>()
+// thinkingIndicator placeholder store moved to placeholder-store.custom.ts —
+// FIFO queue per `${channel}:${thread_ts}` key (fixes concurrent same-thread
+// overwrite). Use pushPlaceholder / consumePlaceholder.
 
 function pruneStalePermissions(): void {
   const cutoff = Date.now() - PERM_TTL_MS
@@ -2871,7 +2871,7 @@ async function deliverEvent(ev: Record<string, unknown>, access: Access): Promis
         unfurl_links: false,
         unfurl_media: false,
       })
-      if (res.ts) pendingThinkingTs.set(`${channelId}:${thinkingThreadTs}`, res.ts as string)
+      if (res.ts) pushPlaceholder(`${channelId}:${thinkingThreadTs}`, res.ts as string)
     } catch {
       /* best-effort — failure here must not block delivery */
     }

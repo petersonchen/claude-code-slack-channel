@@ -107,12 +107,15 @@ export function resolveUbiCodeProfile(
   return value || undefined
 }
 
-function mentionsOtherUser(event: Record<string, unknown>, botUserId: string): boolean {
+export function mentionsOtherUser(event: Record<string, unknown>, botUserId: string): boolean {
   const text = (event.text as string | undefined) || ''
-  const matches = text.matchAll(/<@([A-Z0-9]+)>/g)
-  for (const m of matches) {
+  // User mentions, including the piped display form `<@U123|name>`.
+  for (const m of text.matchAll(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g)) {
     if (m[1] !== botUserId) return true
   }
+  // Broadcast + user-group mentions also target other people. `<!date^...>`
+  // is a date format, NOT a mention, so it is intentionally excluded.
+  if (/<!(?:here|channel|everyone|subteam\^[A-Z0-9]+)/.test(text)) return true
   return false
 }
 
@@ -133,4 +136,60 @@ export async function customGate(event: unknown, opts: GateOptions): Promise<Gat
   }
 
   return result
+}
+
+// ---------------------------------------------------------------------------
+// Fetch authorization filter — close the gate-bypass via fetch_messages /
+// context-recovery (see docs/known-issues-reply-gating.md, Issue 2).
+// ---------------------------------------------------------------------------
+
+/** Minimal shape of a Slack message needed for authorization filtering. */
+type FetchableMessage = { user?: string; bot_id?: string; text?: string }
+
+/** Filter raw Slack thread/history messages so a fetch (e.g. context-recovery)
+ *  cannot re-ingest content the inbound push gate would have dropped.
+ *
+ *  Mirrors the push-path drops:
+ *   - bot's own messages are always kept (legitimate prior context);
+ *   - `contextRecovery.includeUsers`, when set, is the explicit allowlist and
+ *     takes precedence;
+ *   - otherwise `dropIfMentionsOther` and `threadOwnerOnly` are applied with
+ *     the same semantics as on delivery (a non-owner is kept only if it
+ *     @mentions the bot).
+ *
+ *  Pure — `ownerId` is resolved by the caller (session ownerId, else the
+ *  thread's first non-bot sender). */
+export function filterFetchedMessages<T extends FetchableMessage>(
+  messages: readonly T[],
+  opts: {
+    botUserId: string
+    ownerId: string | undefined
+    policy: CustomChannelPolicy | undefined
+    allowFrom: readonly string[]
+  },
+): T[] {
+  const { botUserId, ownerId, policy, allowFrom } = opts
+  const includeUsers = policy?.contextRecovery?.includeUsers
+  const isBot = (m: T): boolean => Boolean(m.bot_id) || m.user === botUserId
+
+  return messages.filter((m): boolean => {
+    if (isBot(m)) return true
+
+    // Explicit context-recovery allowlist wins when configured.
+    if (includeUsers === 'owner_and_bot_only') return m.user === ownerId
+    if (includeUsers === 'allowlisted_and_bot')
+      return m.user !== undefined && allowFrom.includes(m.user)
+    if (includeUsers === 'all_sanitized') return true
+
+    // Otherwise mirror the push-gate drop rules.
+    if (policy?.dropIfMentionsOther && mentionsOtherUser(m as Record<string, unknown>, botUserId))
+      return false
+    if (
+      policy?.threadOwnerOnly &&
+      m.user !== ownerId &&
+      !isMentioned(m as Record<string, unknown>, botUserId)
+    )
+      return false
+    return true
+  })
 }

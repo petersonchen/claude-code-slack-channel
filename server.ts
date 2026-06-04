@@ -32,6 +32,7 @@ import {
   type CustomAccess,
   type CustomChannelPolicy,
   customGate,
+  filterFetchedMessages,
   isMentioned,
   resolveReplyService,
   resolveUbiCodeProfile,
@@ -1408,6 +1409,32 @@ async function executeFetchMessages(
     })
     messages = (res.messages || []).reverse() // oldest-first
   }
+
+  // Apply the same authorization boundary the push gate enforces, so a fetch
+  // (e.g. the context-recovery skill) cannot re-ingest messages that were
+  // gate-dropped on delivery. See docs/known-issues-reply-gating.md, Issue 2.
+  const fetchPolicy = ctx.getAccess().channels[channel] as CustomChannelPolicy | undefined
+  let fetchOwnerId: string | undefined
+  if (threadTs) {
+    try {
+      const s = await loadSession(
+        ctx.STATE_DIR,
+        sessionPath(ctx.STATE_DIR, { channel, thread: threadTs }),
+      )
+      fetchOwnerId = s?.ownerId
+    } catch {
+      /* no session on disk — fall back to the thread's first non-bot sender */
+    }
+  }
+  if (fetchOwnerId === undefined) {
+    fetchOwnerId = messages.find((m: any) => !m.bot_id && m.user)?.user
+  }
+  messages = filterFetchedMessages(messages, {
+    botUserId: ctx.botUserId,
+    ownerId: fetchOwnerId,
+    policy: fetchPolicy,
+    allowFrom: ctx.getAccess().allowFrom,
+  })
 
   const formatted = await Promise.all(
     messages.map(async (m: any) => {

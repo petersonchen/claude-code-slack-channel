@@ -72,6 +72,19 @@ export function applySubstitutions(
   return result
 }
 
+/** The single mandatory chokepoint for outbound *answer* text. Every reply service MUST
+ *  route its user-facing answer through this — directly, or (preferred) via
+ *  `sendServiceAnswer()` in reply.custom.ts, which calls it internally — before posting to
+ *  Slack. This is what makes workspace `textSubstitutions` (branding masks, the `@ONCALL`
+ *  escalation placeholder) apply uniformly across ALL reply services. A new reply service
+ *  that posts answer text without going through here will leak raw placeholders.
+ *
+ *  System / receipt / audit / manifest / thinking-placeholder messages intentionally
+ *  bypass this — substitutions apply to user answers only, never to those surfaces. */
+export function prepareAnswerText(access: Access, text: string): string {
+  return applySubstitutions(text, (access as CustomAccess).textSubstitutions)
+}
+
 export function isMentioned(event: Record<string, unknown>, botUserId: string): boolean {
   if (!botUserId) return false
   const text = (event.text as string | undefined) || ''

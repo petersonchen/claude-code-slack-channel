@@ -3,6 +3,7 @@ import { appendFileSync } from 'node:fs'
 import type { WebClient } from '@slack/web-api'
 import type { Access } from './lib.ts'
 import { type CustomChannelPolicy, resolveReplyService, resolveUbiCodeProfile } from './lib.custom.ts'
+import { sendServiceAnswer } from './reply.custom.ts'
 import { traceReply } from './trace.custom.ts'
 
 const UBI_ERROR_LOG = '/state/ubi-code-error.log'
@@ -55,27 +56,6 @@ const historyCache = new Map<string, ThreadHistoryCacheEntry>()
 const HISTORY_CACHE_TTL_MS = 60_000
 const MAX_HISTORY_MESSAGES = 30
 const MAX_HISTORY_CHARS = 12_000
-const SLACK_CHUNK_MAX_BYTES = 3000
-
-function chunkByBytes(text: string): string[] {
-  const enc = new TextEncoder()
-  const chunks: string[] = []
-  let start = 0
-  while (start < text.length) {
-    let end = start
-    let bytes = 0
-    while (end < text.length) {
-      const b = enc.encode(text[end]).length
-      if (bytes + b > SLACK_CHUNK_MAX_BYTES) break
-      bytes += b
-      end++
-    }
-    if (end === start) end = start + 1 // always advance past a single oversized char
-    chunks.push(text.slice(start, end))
-    start = end
-  }
-  return chunks.length > 0 ? chunks : ['']
-}
 
 function hashText(text: string): string {
   return `sha256:${createHash('sha256').update(text || '').digest('hex')}`
@@ -182,60 +162,6 @@ async function callUbiCode(
   } finally {
     clearTimeout(timer)
   }
-}
-
-async function postOrUpdateAnswer(opts: {
-  web: WebClient
-  channel: string
-  threadTs: string
-  placeholderTs: string | null
-  text: string
-}): Promise<string | null> {
-  const chunks = chunkByBytes(opts.text)
-  let lastTs = opts.placeholderTs
-  if (opts.placeholderTs) {
-    try {
-      await opts.web.chat.update({ channel: opts.channel, ts: opts.placeholderTs, text: chunks[0] })
-    } catch (e) {
-      ubiLog('error', 'chat.update failed', {
-        channel: opts.channel,
-        chars: chunks[0].length,
-        slack_error: e instanceof Error ? e.message : String(e),
-      })
-      throw e
-    }
-  } else {
-    const res = await opts.web.chat.postMessage({
-      channel: opts.channel,
-      thread_ts: opts.threadTs,
-      text: chunks[0],
-      unfurl_links: false,
-      unfurl_media: false,
-    })
-    lastTs = (res.ts as string | undefined) ?? null
-  }
-  for (let i = 1; i < chunks.length; i++) {
-    try {
-      const res = await opts.web.chat.postMessage({
-        channel: opts.channel,
-        thread_ts: opts.threadTs,
-        text: chunks[i],
-        unfurl_links: false,
-        unfurl_media: false,
-      })
-      lastTs = (res.ts as string | undefined) ?? lastTs
-    } catch (e) {
-      ubiLog('error', 'chat.postMessage chunk failed', {
-        channel: opts.channel,
-        chunk_index: i,
-        total_chunks: chunks.length,
-        chars: chunks[i].length,
-        slack_error: e instanceof Error ? e.message : String(e),
-      })
-      throw e
-    }
-  }
-  return lastTs
 }
 
 async function postThinkingIfEnabled(opts: {
@@ -354,6 +280,10 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
       return true
     }
 
+    // Raw model output. Workspace textSubstitutions (@ONCALL escalation placeholder +
+    // claude→LLM masking) are applied inside sendServiceAnswer() — the shared chokepoint
+    // every service-backed reply path funnels through — not here. trace/journal log the
+    // pre-substitution model output on purpose.
     const answer = response.answer || 'wiki 中沒有相關資料'
     traceReply({
       channel,
@@ -366,12 +296,14 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
       question: text,
       answer,
     })
-    const replyTs = await postOrUpdateAnswer({
+    const replyTs = await sendServiceAnswer({
       web: opts.web,
+      access: opts.access,
       channel,
       threadTs,
       placeholderTs,
       text: answer,
+      log: ubiLog,
     })
     opts.journalWrite({
       kind: 'ubi_code.reply',
@@ -398,7 +330,15 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
     })
     const fallback = '發生錯誤，暫時無法回答。請稍後再試。'
     try {
-      await postOrUpdateAnswer({ web: opts.web, channel, threadTs, placeholderTs, text: fallback })
+      await sendServiceAnswer({
+        web: opts.web,
+        access: opts.access,
+        channel,
+        threadTs,
+        placeholderTs,
+        text: fallback,
+        log: ubiLog,
+      })
     } catch {
       // Best effort. The journal entry below is the durable signal.
     }

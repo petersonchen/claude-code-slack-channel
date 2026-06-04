@@ -103,7 +103,7 @@ import {
   evaluate as policyEvaluate,
 } from './policy.ts'
 import { streamReply } from './stream-reply.ts'
-import { traceRoute } from './trace.custom.ts'
+import { traceRoute, traceThread } from './trace.custom.ts'
 
 // ---------------------------------------------------------------------------
 // --verify-audit-log subcommand (ccsc-t7j, Epic 30-A.15)
@@ -1149,6 +1149,18 @@ async function executeReplyStreamingPath(opts: {
   }
   const failureSuffix =
     result.kind === 'failed_mid_stream' ? ` (failed mid-stream: ${result.reason})` : ''
+
+  // [thread-trace] answer going out — streaming path.
+  traceThread('reply', {
+    llm_thread_ts: threadTs ?? null,
+    chat_id: chatId,
+    result_ts: lastTs || null,
+    via: 'stream',
+    stream_kind: result.kind,
+    last_active_thread: lastActiveThread ?? null,
+    text: (text || '').replace(/\s+/g, ' ').slice(0, 80),
+  })
+
   return {
     content: [
       {
@@ -1237,6 +1249,19 @@ async function executeReply(args: Record<string, any>, ctx: ToolContext): Promis
   if (files && files.length > 0) {
     await executeReplyFileUploads(files, chatId, threadTs, ctx)
   }
+
+  // [thread-trace] answer going out — non-streaming path. `via` tells whether
+  // the answer overwrote a thinking placeholder (chat.update) or posted fresh.
+  // If llm_thread_ts is correct but the answer still landed wrong, the
+  // placeholder_update path (#4) is the culprit.
+  traceThread('reply', {
+    llm_thread_ts: threadTs ?? null,
+    chat_id: chatId,
+    result_ts: lastTs || null,
+    via: thinkingTs ? 'placeholder_update' : 'post',
+    last_active_thread: lastActiveThread ?? null,
+    text: (text || '').replace(/\s+/g, ' ').slice(0, 80),
+  })
 
   return {
     content: [
@@ -2888,6 +2913,18 @@ async function deliverEvent(ev: Record<string, unknown>, access: Access): Promis
   if (botUserId) {
     text = text.replace(new RegExp(`<@${botUserId}>\\s*`, 'g'), '').trim()
   }
+
+  // [thread-trace] question coming in — real source thread vs the global the
+  // permission-relay path reads. Snippet is the QUESTION text (pairs with the
+  // reply trace's answer snippet by semantic match, or by ALPHA/BRAVO tag in
+  // the active test).
+  traceThread('deliver', {
+    real_thread: incomingThreadTs ?? null,
+    msg_id: ev.ts ?? null,
+    chat_id: channelId,
+    last_active_thread: lastActiveThread ?? null,
+    text: (text || '').replace(/\s+/g, ' ').slice(0, 80),
+  })
 
   // Push into Claude Code session via MCP notification
   mcp.notification({

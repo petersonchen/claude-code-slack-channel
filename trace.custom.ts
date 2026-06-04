@@ -20,6 +20,21 @@ const TRACE_LOG = process.env.SLACK_TRACE_LOG || '/state/slack-trace.log'
 const clip = (s: string | undefined, n: number): string =>
   (s ?? '').replace(/\s+/g, ' ').slice(0, n)
 
+// [thread-trace] — TEMPORARY diagnostic for the wrong-thread investigation.
+// One line per deliver (question in) + reply (answer out) so the two can be
+// paired and the LLM-supplied thread_ts compared against the real source
+// thread. Discriminates an LLM thread_ts copy error from the thinking-
+// placeholder chat.update path. Own file (not the route/reply trace) so
+// parse-thread-trace.ts reads a clean stream. Kept in *.custom.ts so the
+// personal fork's server.ts diff stays minimal (rebase-clean). REMOVE once
+// root cause is confirmed.
+const THREAD_TRACE_LOG = process.env.SLACK_THREAD_TRACE_LOG || '/state/thread-trace.log'
+
+export function traceThread(stage: 'deliver' | 'reply', fields: Record<string, unknown>): void {
+  const line = `${new Date().toISOString()} [thread-trace] ${stage} ${JSON.stringify(fields)}\n`
+  appendFile(THREAD_TRACE_LOG, line).catch(() => {})
+}
+
 /** One line per inbound message, for every reply service (slack-cc / ubi-code / off). */
 export function traceRoute(o: {
   channel: string

@@ -27,12 +27,19 @@ export type CustomAccess = Access & {
 }
 
 export type CustomChannelPolicy = ChannelPolicy & {
-  /** Drop messages that @-mention any user other than this bot.
-   *  Prevents responding to cross-user conversations. Default-safe: absent/false = no drop. */
-  dropIfMentionsOther?: boolean
-  /** Within a thread, only the thread's owner (first sender) gets bot responses.
-   *  Other users are silenced unless they explicitly @mention the bot. Default-safe: absent/false = off. */
-  threadOwnerOnly?: boolean
+  /** Single switch governing when the bot auto-engages in a thread. Unified rule
+   *  (first match wins), applied per inbound message:
+   *    1. message @mentions the bot            → answer (explicit call wins)
+   *    2. thread's FIRST message tags another   → mark thread ownerless, drop
+   *       user and does NOT @bot
+   *    3. thread is ownerless                   → drop (only @bot answers, via 1)
+   *    4. owned thread, sender == owner,        → answer
+   *       no other-user tag
+   *    5. owned thread, anything else (non-owner;→ drop
+   *       or owner tagging another user)
+   *  Rule 5 drops tag-other messages (even the owner's), which is why no separate
+   *  "drop if mentions other" flag is needed. Default-safe: absent/false = off. */
+  ownerReplyGate?: boolean
   /** Post a "_Thinking..._" placeholder immediately on message receipt, then overwrite it
    *  with the real reply when Claude responds. Default-safe: absent/false = off. */
   thinkingIndicator?: boolean
@@ -132,23 +139,48 @@ export function mentionsOtherUser(event: Record<string, unknown>, botUserId: str
   return false
 }
 
-// ---------------------------------------------------------------------------
-// Custom gate wrapper — runs after libGate delivers, applies extra drop rules
-// ---------------------------------------------------------------------------
+/** Outcome of the `ownerReplyGate` unified rule for one inbound message.
+ *   - `deliver`        — answer it (also the owned-thread first-message path,
+ *                        whose owner session is created downstream).
+ *   - `drop`           — silence it.
+ *   - `open-ownerless` — thread's first message opened an ownerless thread; the
+ *                        caller must persist the ownerless marker and drop. */
+export type OwnerReplyGateDecision = 'deliver' | 'drop' | 'open-ownerless'
 
-export async function customGate(event: unknown, opts: GateOptions): Promise<GateResult> {
-  const result = await libGate(event, opts)
-  if (result.action !== 'deliver') return result
-
-  const ev = event as Record<string, unknown>
-  const channelId = ev.channel as string
-  const policy = result.access?.channels[channelId] as CustomChannelPolicy | undefined
-
-  if (policy?.dropIfMentionsOther && mentionsOtherUser(ev, opts.botUserId)) {
-    return { action: 'drop' }
+/** Pure core of the `ownerReplyGate` gate. The caller has already confirmed the
+ *  channel has `ownerReplyGate: true` and resolved `existingSession` (null when
+ *  this is the thread's first message). See the rule table on
+ *  `CustomChannelPolicy.ownerReplyGate`. */
+export function decideOwnerReplyGate(
+  ev: Record<string, unknown>,
+  botUserId: string,
+  existingSession: { ownerId: string; ownerless?: boolean } | null,
+): OwnerReplyGateDecision {
+  if (isMentioned(ev, botUserId)) return 'deliver' // rule 1: @bot always wins
+  const tagsOther = mentionsOtherUser(ev, botUserId)
+  if (existingSession === null) {
+    // First message, no @bot.
+    if (tagsOther) return 'open-ownerless' // rule 2
+    return 'deliver' // rule 4: plain opener → owned thread
   }
+  if (existingSession.ownerless) return 'drop' // rule 3
+  if (existingSession.ownerId !== (ev.user as string)) return 'drop' // rule 5: non-owner
+  if (tagsOther) return 'drop' // rule 5: owner tags another user
+  return 'deliver' // rule 4
+}
 
-  return result
+// ---------------------------------------------------------------------------
+// Custom gate wrapper — reserved extension seam over libGate.
+// ---------------------------------------------------------------------------
+
+/** Thin wrapper around the upstream `libGate`. Currently a passthrough: the
+ *  `ownerReplyGate` gating runs later, in `deliverEvent` (server.ts), so that an
+ *  explicit @bot can still win on a thread's first message (rule 1) — a gate-stage
+ *  drop could not see thread/session state. Kept as the single seam where future
+ *  custom *gate-stage* drop rules would attach without editing the upstream call
+ *  path in server.ts. */
+export async function customGate(event: unknown, opts: GateOptions): Promise<GateResult> {
+  return libGate(event, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -166,9 +198,9 @@ type FetchableMessage = { user?: string; bot_id?: string; text?: string }
  *   - bot's own messages are always kept (legitimate prior context);
  *   - `contextRecovery.includeUsers`, when set, is the explicit allowlist and
  *     takes precedence;
- *   - otherwise `dropIfMentionsOther` and `threadOwnerOnly` are applied with
- *     the same semantics as on delivery (a non-owner is kept only if it
- *     @mentions the bot).
+ *   - otherwise `ownerReplyGate` (unified rule) is applied with the same
+ *     semantics as on delivery (@bot wins; only the owner's non-tagging messages
+ *     are kept; an ownerless thread is signalled by `ownerId === undefined`).
  *
  *  Pure — `ownerId` is resolved by the caller (session ownerId, else the
  *  thread's first non-bot sender). */
@@ -195,14 +227,16 @@ export function filterFetchedMessages<T extends FetchableMessage>(
     if (includeUsers === 'all_sanitized') return true
 
     // Otherwise mirror the push-gate drop rules.
-    if (policy?.dropIfMentionsOther && mentionsOtherUser(m as Record<string, unknown>, botUserId))
-      return false
-    if (
-      policy?.threadOwnerOnly &&
-      m.user !== ownerId &&
-      !isMentioned(m as Record<string, unknown>, botUserId)
-    )
-      return false
+    // `ownerReplyGate` is the unified rule (see server.ts
+    // shouldDropForOwnerReplyGate): @bot wins; else keep only the owner's
+    // non-tagging messages. Ownerless threads are passed `ownerId === undefined`
+    // by the caller, so every non-bot message except explicit @bot is dropped.
+    if (policy?.ownerReplyGate) {
+      if (isMentioned(m as Record<string, unknown>, botUserId)) return true
+      if (m.user !== ownerId) return false
+      if (mentionsOtherUser(m as Record<string, unknown>, botUserId)) return false
+      return true
+    }
     return true
   })
 }

@@ -2275,6 +2275,31 @@ describe('loadSession', () => {
     expect(loaded).toEqual(s)
   })
 
+  test('round-trips an ownerless thread (data.ownerless survives save/load)', async () => {
+    const key = { channel: 'C_OL', thread: '1700000000.000200' }
+    const p = sessionPath(tmpRoot, key)
+    // ownerless lives in the upstream-owned `data` bag (lib.ts stays pristine).
+    const base = makeSession(key.channel, key.thread)
+    const s: Session = { ...base, data: { ...base.data, ownerless: true } }
+
+    await saveSession(p, s)
+    const loaded = await loadSession(tmpRoot, p)
+
+    expect(loaded?.data.ownerless).toBe(true)
+    expect(loaded).toEqual(s)
+  })
+
+  test('loads a legacy session file with no ownerless marker (→ undefined)', async () => {
+    const key = { channel: 'C_LEGACY', thread: '1700000000.000300' }
+    const p = sessionPath(tmpRoot, key)
+    const s = makeSession(key.channel, key.thread) // no ownerless marker in data
+
+    await saveSession(p, s)
+    const loaded = await loadSession(tmpRoot, p)
+
+    expect(loaded?.data.ownerless).toBeUndefined()
+  })
+
   test('throws ENOENT when file is missing', async () => {
     const p = sessionPath(tmpRoot, { channel: 'C_MISS', thread: 'T1.0' })
     // sessionPath created the per-channel dir but no file yet.

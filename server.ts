@@ -32,8 +32,8 @@ import {
   type CustomAccess,
   type CustomChannelPolicy,
   customGate,
+  decideOwnerReplyGate,
   filterFetchedMessages,
-  isMentioned,
   resolveReplyService,
   resolveUbiCodeProfile,
 } from './lib.custom.ts'
@@ -1415,6 +1415,10 @@ async function executeFetchMessages(
   // gate-dropped on delivery. See docs/known-issues-reply-gating.md, Issue 2.
   const fetchPolicy = ctx.getAccess().channels[channel] as CustomChannelPolicy | undefined
   let fetchOwnerId: string | undefined
+  // An ownerless thread has no owner: keep fetchOwnerId undefined AND skip the
+  // first-non-bot-sender fallback, so filterFetchedMessages keeps only bot + @bot
+  // messages (mirrors the push gate's ownerless rule).
+  let fetchOwnerless = false
   if (threadTs) {
     try {
       const s = await loadSession(
@@ -1422,11 +1426,14 @@ async function executeFetchMessages(
         sessionPath(ctx.STATE_DIR, { channel, thread: threadTs }),
       )
       fetchOwnerId = s?.ownerId
+      fetchOwnerless = s?.data?.ownerless === true
     } catch {
       /* no session on disk — fall back to the thread's first non-bot sender */
     }
   }
-  if (fetchOwnerId === undefined) {
+  if (fetchOwnerless) {
+    fetchOwnerId = undefined
+  } else if (fetchOwnerId === undefined) {
     fetchOwnerId = messages.find((m: any) => !m.bot_id && m.user)?.user
   }
   messages = filterFetchedMessages(messages, {
@@ -2682,14 +2689,67 @@ export async function activateAndTouch(
 // Inbound message handler
 // ---------------------------------------------------------------------------
 
-async function shouldDropForThreadOwnerOnly(
+/** Persist the ownerless marker for a thread's first message (rule 2 of the
+ *  `ownerReplyGate` unified rule). Creates the session via the supervisor with
+ *  `ownerId` = the opener (kept for audit) and `data.ownerless = true`, so every
+ *  later message in the thread needs an explicit @bot mention to be answered.
+ *  (Stored in the upstream-owned `data` bag, not a new top-level field, to keep
+ *  `lib.ts` pristine for rebase.)
+ *
+ *  Error policy mirrors activateAndTouch: log and swallow, never throw — a
+ *  failed marker must not crash the event loop. Idempotent via the supervisor's
+ *  single-flight activate(). No-op when the supervisor is not running. */
+async function markThreadOwnerless(key: SessionKey, ownerId: string | undefined): Promise<void> {
+  if (supervisor === null) return
+  let handle: import('./supervisor.ts').SessionHandle
+  try {
+    handle = await supervisor.activate(key, ownerId)
+  } catch (err) {
+    console.error('[slack] markThreadOwnerless: activate failed — marker not set', {
+      channel: key.channel,
+      thread: key.thread,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return
+  }
+  try {
+    await handle.update((s) => ({
+      ...s,
+      data: { ...s.data, ownerless: true },
+      lastActiveAt: Date.now(),
+    }))
+  } catch (err) {
+    console.error('[slack] markThreadOwnerless: update failed — marker not persisted', {
+      channel: key.channel,
+      thread: key.thread,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/** Decide whether to DROP an inbound message under the per-channel
+ *  `ownerReplyGate` unified rule, and — as a side effect — persist the ownerless
+ *  marker when a thread's first message opens an ownerless thread (rule 2).
+ *  Returns true to drop, false to deliver.
+ *
+ *  Rule (first match wins):
+ *    1. message @mentions the bot                         → deliver
+ *    2. thread's first message tags another user, no @bot → mark ownerless, drop
+ *    3. thread is ownerless                               → drop
+ *    4. owned thread, sender == owner, no other-user tag  → deliver
+ *    5. owned thread, anything else (non-owner; or owner  → drop
+ *       tagging another user)
+ *
+ *  NOTE: not pure — rule 2 writes a session via markThreadOwnerless(). Shared by
+ *  both reply-service paths (slack-cc deliverEvent + ubi-code), so the ownerless
+ *  marker is created regardless of which service handles the channel. */
+async function shouldDropForOwnerReplyGate(
   ev: Record<string, unknown>,
   access: Access,
 ): Promise<boolean> {
   const channelId = ev.channel as string
   const incomingThreadTs = ev.thread_ts as string | undefined
-  if (!(access.channels[channelId] as CustomChannelPolicy | undefined)?.threadOwnerOnly)
-    return false
+  if (!(access.channels[channelId] as CustomChannelPolicy | undefined)?.ownerReplyGate) return false
 
   const threadKey: SessionKey = {
     channel: channelId,
@@ -2699,13 +2759,20 @@ async function shouldDropForThreadOwnerOnly(
   try {
     existingSession = await loadSession(STATE_DIR, sessionPath(STATE_DIR, threadKey))
   } catch {
-    // ENOENT = first message in thread, allow through.
+    // ENOENT = first message in this thread.
   }
-  return Boolean(
-    existingSession &&
-      existingSession.ownerId !== (ev.user as string) &&
-      !isMentioned(ev, botUserId),
-  )
+
+  // ownerless lives in the upstream-owned `data` bag (keeps lib.ts pristine).
+  const sessionView = existingSession
+    ? { ownerId: existingSession.ownerId, ownerless: existingSession.data?.ownerless === true }
+    : null
+  const decision = decideOwnerReplyGate(ev, botUserId, sessionView)
+  if (decision === 'open-ownerless') {
+    // Rule 2: opened by tagging another user → persist the ownerless marker, drop.
+    await markThreadOwnerless(threadKey, ev.user as string | undefined)
+    return true
+  }
+  return decision === 'drop'
 }
 
 /** Deliver a gated inbound event to Claude Code via MCP.
@@ -2745,7 +2812,7 @@ async function deliverEvent(ev: Record<string, unknown>, access: Access): Promis
     },
   })
 
-  if (await shouldDropForThreadOwnerOnly(ev, access)) return
+  if (await shouldDropForOwnerReplyGate(ev, access)) return
 
   // Activate session and record inbound activity via the supervisor.
   // The thread key follows session-state-machine.md §39: top-level
@@ -3034,7 +3101,7 @@ async function handleMessage(event: unknown): Promise<void> {
       })
       if (replyService === 'off') return
       if (replyService === 'ubi-code') {
-        if (await shouldDropForThreadOwnerOnly(ev, result.access!)) return
+        if (await shouldDropForOwnerReplyGate(ev, result.access!)) return
         const { maybeHandleUbiCodeReply } = await import('./ubi-code.custom.ts')
         await maybeHandleUbiCodeReply({
           event: ev,

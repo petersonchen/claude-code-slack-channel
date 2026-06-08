@@ -56,6 +56,12 @@ export type SendServiceAnswerOpts = {
   /** Raw answer text from the service. Substitutions are applied here — callers MUST
    *  pass the unsubstituted text so the chokepoint runs exactly once. */
   text: string
+  /** Optional outbound value-exfiltration guard (ccsc-z0n.3). Bound to the live
+   *  secret values by the caller (server.ts `assertNoSecretValues`). Checked once
+   *  on the full substituted answer before anything is posted, so a leaked secret
+   *  is blocked even if it would straddle a chunk boundary. Throws → nothing is
+   *  posted. Absent → no value check (back-compat). */
+  assertNoSecretValues?: (payload: string) => void
   /** Optional structured error logger (e.g. ubi-code's ubiLog). */
   log?: (level: 'error', msg: string, extra?: Record<string, unknown>) => void
 }
@@ -66,6 +72,10 @@ export type SendServiceAnswerOpts = {
  *  ts of the last posted/updated message (or null). Re-throws on Slack API failure. */
 export async function sendServiceAnswer(opts: SendServiceAnswerOpts): Promise<string | null> {
   const text = prepareAnswerText(opts.access, opts.text)
+  // Outbound secret-value guard runs on the full substituted text before any
+  // post — a live token never reaches Slack, even split across chunks. Throws
+  // before lastTs is touched, so a blocked answer posts nothing.
+  opts.assertNoSecretValues?.(text)
   const chunks = chunkByBytes(text)
   let lastTs = opts.placeholderTs
   if (opts.placeholderTs) {

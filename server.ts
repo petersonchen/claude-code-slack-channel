@@ -3112,6 +3112,7 @@ async function handleMessage(event: unknown): Promise<void> {
           sharedSecret: process.env.UBI_CODE_SHARED_SECRET,
           timeoutMs: Number(process.env.UBI_CODE_TIMEOUT_MS || 120_000),
           journalWrite,
+          assertNoSecretValues,
           activateSession: async (channel, thread, ownerId) => {
             if (supervisor !== null)
               await activateAndTouch(supervisor, { channel, thread }, ownerId)

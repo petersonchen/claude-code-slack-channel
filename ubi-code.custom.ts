@@ -50,6 +50,10 @@ export type MaybeHandleUbiCodeReplyOptions = {
   timeoutMs?: number
   journalWrite: JournalWrite
   activateSession: (channel: string, thread: string, ownerId: string | undefined) => Promise<void>
+  /** Outbound value-exfiltration guard (ccsc-z0n.3), forwarded to sendServiceAnswer
+   *  so the ubi-code answer goes through the same token check as the native reply
+   *  path. Absent → no value check. */
+  assertNoSecretValues?: (payload: string) => void
 }
 
 const historyCache = new Map<string, ThreadHistoryCacheEntry>()
@@ -303,6 +307,7 @@ export async function maybeHandleUbiCodeReply(opts: MaybeHandleUbiCodeReplyOptio
       threadTs,
       placeholderTs,
       text: answer,
+      assertNoSecretValues: opts.assertNoSecretValues,
       log: ubiLog,
     })
     opts.journalWrite({

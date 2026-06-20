@@ -105,6 +105,7 @@ import {
   evaluate as policyEvaluate,
 } from './policy.ts'
 import { streamReply } from './stream-reply.ts'
+import { handleTopicValidation } from './topic-validate.custom.ts'
 import { traceRoute, traceThread } from './trace.custom.ts'
 
 // ---------------------------------------------------------------------------
@@ -1208,7 +1209,18 @@ async function executeReply(args: Record<string, any>, ctx: ToolContext): Promis
   // ccsc-h1h — streaming branch. Extracted to executeReplyStreamingPath
   // to keep executeReply's CRAP score under the 30 threshold.
   if (stream && text.length > limit) {
-    return executeReplyStreamingPath({ chatId, threadTs, text, files, limit, ctx })
+    const streamResult = await executeReplyStreamingPath({
+      chatId,
+      threadTs,
+      text,
+      files,
+      limit,
+      ctx,
+    })
+    // Custom: per-topic answer validator (Plan A). Draft already posted; on
+    // violations we post a notice + return isError so the agent regenerates.
+    const reval = await handleTopicValidation({ web: ctx.web, channel: chatId, threadTs, text })
+    return reval ?? streamResult
   }
 
   // Non-streaming path — existing behavior unchanged.
@@ -1262,6 +1274,11 @@ async function executeReply(args: Record<string, any>, ctx: ToolContext): Promis
     last_active_thread: lastActiveThread ?? null,
     text: (text || '').replace(/\s+/g, ' ').slice(0, 80),
   })
+
+  // Custom: per-topic answer validator (Plan A). Draft already posted above; on
+  // violations we post a notice + return isError so the agent regenerates in-session.
+  const reval = await handleTopicValidation({ web: ctx.web, channel: chatId, threadTs, text })
+  if (reval) return reval
 
   return {
     content: [

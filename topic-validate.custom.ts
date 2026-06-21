@@ -35,6 +35,7 @@ import { spawn } from 'node:child_process'
 import { accessSync, constants } from 'node:fs'
 import { join } from 'node:path'
 import type { WebClient } from '@slack/web-api'
+import { traceValidate } from './trace.custom.ts'
 
 /** Minimal mirror of server.ts's ToolResult — kept local to avoid importing
  *  upstream-private types into a custom module. */
@@ -84,24 +85,37 @@ export function __resetAttemptsForTest(): void {
   attempts.clear()
 }
 
-/** Run the topic validator over the answer text. Returns the violations it
- *  reports, or [] when the topic has no validator OR the validator itself fails
- *  (fail-open: a broken validator must never block answering). Never throws. */
-export async function runTopicValidator(answerText: string): Promise<Violation[]> {
+/** Outcome of one validator run.
+ *    ran    — validator present & executed (false = topic has no validator)
+ *    failed — ran but self-failed (missing-after-check/spawn/timeout/error/exit≠0)
+ *             → fail-open: `violations` is [] and must not block answering
+ *    violations — only meaningful when ran && !failed */
+export type ValidateResult = {
+  violations: Violation[]
+  ran: boolean
+  failed: boolean
+  latencyMs: number
+}
+
+/** Run the topic validator over the answer text. Never throws — every internal
+ *  failure resolves with failed=true and empty violations (fail-open). Returns
+ *  ran=false when the topic ships no validator (silent opt-out). */
+export async function runTopicValidator(answerText: string): Promise<ValidateResult> {
+  const startedAt = Date.now()
   const validator = validatorPath()
   // Missing or non-executable → topic opts out of validation. Silent no-op.
   try {
     accessSync(validator, constants.X_OK)
   } catch {
-    return []
+    return { violations: [], ran: false, failed: false, latencyMs: 0 }
   }
 
-  return new Promise<Violation[]>((resolve) => {
+  return new Promise<ValidateResult>((resolve) => {
     let settled = false
-    const done = (v: Violation[]) => {
+    const finish = (violations: Violation[], failed: boolean) => {
       if (settled) return
       settled = true
-      resolve(v)
+      resolve({ violations, ran: true, failed, latencyMs: Date.now() - startedAt })
     }
 
     let proc: ReturnType<typeof spawn>
@@ -112,7 +126,7 @@ export async function runTopicValidator(answerText: string): Promise<Violation[]
       })
     } catch (e) {
       console.error('[topic-validate] spawn failed', e instanceof Error ? e.message : String(e))
-      return done([])
+      return finish([], true)
     }
 
     const timer = setTimeout(() => {
@@ -122,7 +136,7 @@ export async function runTopicValidator(answerText: string): Promise<Violation[]
       } catch {
         /* already gone */
       }
-      done([]) // fail-open on timeout
+      finish([], true) // fail-open on timeout
     }, validatorTimeoutMs())
 
     let stdout = ''
@@ -135,7 +149,7 @@ export async function runTopicValidator(answerText: string): Promise<Violation[]
     proc.on('error', (e) => {
       clearTimeout(timer)
       console.error('[topic-validate] process error', e instanceof Error ? e.message : String(e))
-      done([]) // fail-open
+      finish([], true) // fail-open
     })
 
     proc.on('close', (code) => {
@@ -143,9 +157,9 @@ export async function runTopicValidator(answerText: string): Promise<Violation[]
       // Non-zero exit = validator self-failure → fail-open (ignore output).
       if (code !== 0) {
         if (code !== null) console.error(`[topic-validate] validator exit ${code}, fail-open`)
-        return done([])
+        return finish([], true)
       }
-      done(parseViolations(stdout))
+      finish(parseViolations(stdout), false)
     })
 
     // Feed the answer on stdin, then close it.
@@ -155,7 +169,7 @@ export async function runTopicValidator(answerText: string): Promise<Violation[]
     } catch (e) {
       clearTimeout(timer)
       console.error('[topic-validate] stdin write failed', e instanceof Error ? e.message : String(e))
-      done([])
+      finish([], true)
     }
   })
 }
@@ -207,23 +221,48 @@ export async function handleTopicValidation(
   opts: HandleTopicValidationOpts,
 ): Promise<ToolResult | null> {
   const key = `${opts.channel}:${opts.threadTs ?? ''}`
-  // runTopicValidator never rejects — it resolves [] on every internal failure
-  // (fail-open is its contract), so no try/catch is needed here.
-  const violations = await runTopicValidator(opts.text)
+  // runTopicValidator never rejects — every internal failure resolves with
+  // failed=true (fail-open is its contract), so no try/catch is needed here.
+  const result = await runTopicValidator(opts.text)
+  const trace = (
+    outcome: 'pass' | 'violations' | 'cap_reached' | 'error',
+    extra: { count?: number; rules?: string[]; attempt?: number } = {},
+  ) =>
+    traceValidate({
+      channel: opts.channel,
+      thread: opts.threadTs,
+      outcome,
+      latencyMs: result.latencyMs,
+      ...extra,
+    })
 
+  // Topic ships no validator → silent opt-out, nothing to trace or do.
+  if (!result.ran) return null
+
+  // Validator self-failed (missing/timeout/error/exit≠0) → fail-open, but record it.
+  if (result.failed) {
+    trace('error')
+    return null
+  }
+
+  const violations = result.violations
   if (violations.length === 0) {
     resetAttempt(key)
+    trace('pass', { count: 0 })
     return null
   }
 
   const attempt = bumpAttempt(key)
+  const rules = violations.map((v) => v.rule)
   if (attempt > MAX_REGEN) {
     // Cap reached — accept the answer (already posted) but warn the user.
     resetAttempt(key)
+    trace('cap_reached', { count: violations.length, rules, attempt })
     await postNotice(opts, '⚠️ 範例可能未通過語法檢查,已嘗試重新產生但未成功,請人工確認。')
     return null
   }
 
+  trace('violations', { count: violations.length, rules, attempt })
   await postNotice(opts, '⚠️ 範例未通過語法檢查,重新產生中…')
   return {
     content: [{ type: 'text', text: buildFixInstruction(violations) }],

@@ -15,7 +15,8 @@
 
 import { appendFile } from 'node:fs/promises'
 
-const TRACE_LOG = process.env.SLACK_TRACE_LOG || '/state/slack-trace.log'
+// Resolved lazily (per call) so the env can be set after import — e.g. in tests.
+const traceLogPath = (): string => process.env.SLACK_TRACE_LOG || '/state/slack-trace.log'
 
 const clip = (s: string | undefined, n: number): string =>
   (s ?? '').replace(/\s+/g, ' ').slice(0, n)
@@ -46,7 +47,7 @@ export function traceRoute(o: {
   const profile = o.profile ? ` profile=${o.profile}` : ''
   const dropped = o.service === 'off' ? ' (dropped)' : ''
   const line = `${new Date().toISOString()} | route | ch=${o.channel} thr=${o.thread ?? '-'} user=${o.user ?? '-'} | service=${o.service}${profile}${dropped}\n`
-  appendFile(TRACE_LOG, line).catch(() => {})
+  appendFile(traceLogPath(), line).catch(() => {})
 }
 
 /** Outcome line for the ubi-code service — latency, status, picked rules, Q+A preview. */
@@ -66,5 +67,29 @@ export function traceReply(o: {
   const qa =
     o.question || o.answer ? ` | q="${clip(o.question, 80)}" a="${clip(o.answer, 100)}"` : ''
   const line = `${new Date().toISOString()} | reply | ch=${o.channel} thr=${o.thread ?? '-'} | service=${o.service}${profile} status=${o.status} ${o.latencyMs}ms${rules}${qa}\n`
-  appendFile(TRACE_LOG, line).catch(() => {})
+  appendFile(traceLogPath(), line).catch(() => {})
+}
+
+/** Outcome line for the per-topic answer validator (native reply path). One line
+ *  per validation so operators can see whether the topic's response/check was
+ *  invoked, what it returned, and whether a regen was triggered.
+ *    outcome=pass        — validator ran, no violations
+ *    outcome=violations  — violations found, agent asked to regen (see attempt)
+ *    outcome=cap_reached — MAX_REGEN exhausted, answer accepted with a warning
+ *    outcome=error       — validator missing/timeout/non-zero exit → fail-open */
+export function traceValidate(o: {
+  channel: string
+  thread?: string
+  outcome: 'pass' | 'violations' | 'cap_reached' | 'error'
+  count?: number
+  rules?: string[]
+  attempt?: number
+  latencyMs?: number
+}): void {
+  const count = o.count !== undefined ? ` count=${o.count}` : ''
+  const rules = o.rules?.length ? ` rules=${o.rules.join(',')}` : ''
+  const attempt = o.attempt !== undefined ? ` attempt=${o.attempt}` : ''
+  const ms = o.latencyMs !== undefined ? ` ${o.latencyMs}ms` : ''
+  const line = `${new Date().toISOString()} | validate | ch=${o.channel} thr=${o.thread ?? '-'} | outcome=${o.outcome}${count}${rules}${attempt}${ms}\n`
+  appendFile(traceLogPath(), line).catch(() => {})
 }
